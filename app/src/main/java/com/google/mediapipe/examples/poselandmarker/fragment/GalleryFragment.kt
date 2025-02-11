@@ -32,13 +32,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import com.google.mediapipe.examples.poselandmarker.MainViewModel
+import com.google.mediapipe.examples.poselandmarker.PoseClassifier
 import com.google.mediapipe.examples.poselandmarker.PoseLandmarkerHelper
 import com.google.mediapipe.examples.poselandmarker.databinding.FragmentGalleryBinding
 import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import kotlin.math.absoluteValue
+import kotlin.math.atan2
 
 class GalleryFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener {
 
@@ -75,6 +79,175 @@ class GalleryFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener {
                 }
             }
         }
+
+    private fun detectPose(result: PoseLandmarkerResult): String {
+        val landmarks = preprocessPoseLandmarks(result)
+
+        // Ensure we have 33 landmarks, each with x, y, z (total 99 values)
+        if (landmarks.size != 99) {
+            Log.e(TAG, "Incorrect landmark size: ${landmarks.size}, expected 99")
+            return "Invalid pose input"
+        }
+
+        // Initialize Pose Classifier
+        val poseClassifier = PoseClassifier(requireContext())
+
+        // Run classification
+        val poseLabel = poseClassifier.classifyPose(landmarks)
+
+        return poseLabel
+    }
+
+    private fun preprocessPoseLandmarks(result: PoseLandmarkerResult): FloatArray {
+        val landmarks = mutableListOf<Float>()
+
+        // Ensure pose landmarks exist
+        val poseLandmarks = result.landmarks().firstOrNull() ?: return FloatArray(0)
+
+        for (landmark in poseLandmarks) {
+            landmarks.add(landmark.x()) // X coordinate
+            landmarks.add(landmark.y()) // Y coordinate
+            landmarks.add(landmark.z()) // Z coordinate
+        }
+
+        if (landmarks.size != 99) {
+            Log.e(TAG, "Extracted ${landmarks.size} landmarks, expected 99")
+        }
+
+        return landmarks.toFloatArray()
+    }
+
+    private val poseLandmarks = listOf(
+        "Nose", "Left Eye Inner", "Left Eye", "Left Eye Outer", "Right Eye Inner", "Right Eye",
+        "Right Eye Outer", "Left Ear", "Right Ear", "Mouth Left", "Mouth Right", "Left Shoulder",
+        "Right Shoulder", "Left Elbow", "Right Elbow", "Left Wrist", "Right Wrist", "Left Pinky",
+        "Right Pinky", "Left Index", "Right Index", "Left Thumb", "Right Thumb", "Left Hip",
+        "Right Hip", "Left Knee", "Right Knee", "Left Ankle", "Right Ankle", "Left Heel",
+        "Right Heel", "Left Foot Index", "Right Foot Index"
+    )
+
+    private fun processPoseResult(result: PoseLandmarkerResult) {
+        result.landmarks().firstOrNull()?.forEachIndexed { index, landmark ->
+            val bodyPart = poseLandmarks.getOrNull(index) ?: "Unknown"
+            Log.d(TAG, "PoseMapping $bodyPart -> x=${landmark.x()}, y=${landmark.y()}, z=${landmark.z()}")
+        }
+    }
+
+    private fun workOutActivity(result: PoseLandmarkerResult): String {
+        val rightHandRaised = isRightHandRaised(result)
+        val plankStatus = isPlankPose(result)
+        val treePoseStatus = isTreePose(result)
+        val squatStatus = isSquatPose(result)
+
+        return when {
+            plankStatus -> "Plank Pose"
+            treePoseStatus -> "Tree Pose"
+            rightHandRaised -> "Right Hand Raised"
+            squatStatus -> "Squat Pose"
+            else -> "I don't know"
+        }
+    }
+
+    fun calculateAngle(a: Point, b: Point, c: Point): Double {
+        val radians = atan2(c.y - b.y, c.x - b.x) - atan2(a.y - b.y, a.x - b.x)
+        var angle = Math.toDegrees(radians.toDouble()).absoluteValue
+        if (angle > 180) angle = 360 - angle
+        return angle
+    }
+
+    data class Point(val x: Float, val y: Float)
+
+    private fun isSquatPose(result: PoseLandmarkerResult): Boolean {
+        val landmarks = result.landmarks().firstOrNull() ?: return false
+
+        // Landmark indices for key body parts
+        val leftHip = landmarks[23]
+        val rightHip = landmarks[24]
+        val leftKnee = landmarks[25]
+        val rightKnee = landmarks[26]
+        val leftAnkle = landmarks[27]
+        val rightAnkle = landmarks[28]
+
+        // Convert NormalizedLandmark to Point
+        val leftHipPoint = Point(leftHip.x(), leftHip.y())
+        val leftKneePoint = Point(leftKnee.x(), leftKnee.y())
+        val leftAnklePoint = Point(leftAnkle.x(), leftAnkle.y())
+        val rightHipPoint = Point(rightHip.x(), rightHip.y())
+        val rightKneePoint = Point(rightKnee.x(), rightKnee.y())
+        val rightAnklePoint = Point(rightAnkle.x(), rightAnkle.y())
+
+        // Calculate the angles of the left and right legs
+        val leftLegAngle = calculateAngle(leftHipPoint, leftKneePoint, leftAnklePoint)
+        val rightLegAngle = calculateAngle(rightHipPoint, rightKneePoint, rightAnklePoint)
+
+        // Check if both knees are bent (angle < 100 degrees, adjustable threshold)
+        val kneesBent = leftLegAngle < 100 && rightLegAngle < 100
+
+        // Check if hips are lower than knees
+        val hipsLowered = leftHip.y() > leftKnee.y() && rightHip.y() > rightKnee.y()
+
+        // Check if both feet are on the ground (ankles are at a similar height)
+        val feetOnGround = (leftAnkle.y() - rightAnkle.y()).absoluteValue < 0.1f
+
+        // Combine conditions to determine if the pose is a squat
+        return kneesBent && hipsLowered && feetOnGround
+    }
+
+    private fun isRightHandRaised(result: PoseLandmarkerResult): Boolean {
+        val landmarks = result.landmarks().firstOrNull() ?: return false
+        val rightWrist = landmarks[14]
+        val rightShoulder = landmarks[10]
+        return rightWrist.y() < rightShoulder.y()
+    }
+
+    private fun isPlankPose(result: PoseLandmarkerResult): Boolean {
+        val landmarks = result.landmarks().firstOrNull() ?: return false
+
+        val leftShoulder = landmarks[11]
+        val rightShoulder = landmarks[12]
+        val leftHip = landmarks[23]
+        val rightHip = landmarks[24]
+        val leftAnkle = landmarks[27]
+        val rightAnkle = landmarks[28]
+
+        // Check alignment of shoulders, hips, and ankles
+        val shoulderHipSlope = (leftShoulder.y() - leftHip.y()).absoluteValue +
+                (rightShoulder.y() - rightHip.y()).absoluteValue
+        val hipAnkleSlope = (leftHip.y() - leftAnkle.y()).absoluteValue +
+                (rightHip.y() - rightAnkle.y()).absoluteValue
+
+        // Thresholds to determine alignment (adjust as necessary)
+        val alignmentThreshold = 0.1f
+
+        // Ensure the body is straight (shoulders, hips, and ankles aligned)
+        return shoulderHipSlope < alignmentThreshold && hipAnkleSlope < alignmentThreshold
+    }
+
+    private fun isTreePose(result: PoseLandmarkerResult): Boolean {
+        val landmarks = result.landmarks().firstOrNull() ?: return false
+
+        // Landmark indices for key body parts
+        val leftWrist = landmarks[15]
+        val rightWrist = landmarks[16]
+        val leftShoulder = landmarks[11]
+        val rightShoulder = landmarks[12]
+        val leftKnee = landmarks[25]
+        val rightKnee = landmarks[26]
+        val leftAnkle = landmarks[27]
+        val rightAnkle = landmarks[28]
+
+        // 1. Check if both hands are raised above the shoulders
+        val handsRaised = leftWrist.y() < leftShoulder.y() && rightWrist.y() < rightShoulder.y()
+
+        // 2. Check if one foot is on the opposite thigh (e.g., left ankle near right thigh or vice versa)
+        val leftFootOnRightThigh = (leftAnkle.x() - rightKnee.x()).absoluteValue < 0.1f &&
+                (leftAnkle.y() - rightKnee.y()).absoluteValue < 0.1f
+        val rightFootOnLeftThigh = (rightAnkle.x() - leftKnee.x()).absoluteValue < 0.1f &&
+                (rightAnkle.y() - leftKnee.y()).absoluteValue < 0.1f
+
+        // Combine conditions to determine if the pose is a Tree Pose
+        return handsRaised && (leftFootOnRightThigh || rightFootOnLeftThigh)
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -291,7 +464,18 @@ class GalleryFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener {
                             currentDelegate = viewModel.currentDelegate
                         )
 
+                    var personActivity = ""
+                    var detectedPose = ""
                     poseLandmarkerHelper.detectImage(bitmap)?.let { result ->
+                        val results = result.results
+                        for (landmark in results) {
+                            detectedPose = detectPose(landmark)
+                            if (detectedPose != "Error classification") {
+                                Log.d(TAG, "onResults: detectPose $detectedPose")
+                            }
+                            processPoseResult(landmark)
+                            personActivity = workOutActivity(landmark)
+                        }
                         activity?.runOnUiThread {
                             fragmentGalleryBinding.overlay.setResults(
                                 result.results[0],
@@ -301,6 +485,8 @@ class GalleryFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener {
                             )
 
                             setUiEnabled(true)
+                            fragmentGalleryBinding.bottomSheetLayout.poseClassificationName.text = detectedPose
+                            fragmentGalleryBinding.bottomSheetLayout.plankPoseStatus.text = personActivity
                             fragmentGalleryBinding.bottomSheetLayout.inferenceTimeVal.text =
                                 String.format("%d ms", result.inferenceTime)
                         }

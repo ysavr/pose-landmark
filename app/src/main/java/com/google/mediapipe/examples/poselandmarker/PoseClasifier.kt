@@ -12,7 +12,7 @@ class PoseClassifier(context: Context) {
 
     init {
         // Load TFLite model
-        val model = FileUtil.loadMappedFile(context, "pose_classifier.tflite")
+        val model = FileUtil.loadMappedFile(context, "pose_classifier_2.tflite")
         interpreter = Interpreter(model)
 
         // Load Labels from JSON
